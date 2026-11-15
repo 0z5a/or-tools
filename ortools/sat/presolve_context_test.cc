@@ -1471,6 +1471,193 @@ TEST(PresolveContextTest, IntersectionOfAffineExprsIsNotEmpty_prime_reach) {
   EXPECT_TRUE(context.IntersectionOfAffineExprsIsNotEmpty(expr1, expr2));
 }
 
+TEST(PresolveContextTest, CanonicalizeLinMaxSortsTermsAndExpressions) {
+  Model model;
+  CpModelProto working_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      lin_max {
+        target {
+          vars: [ 2, 1, 2 ]
+          coeffs: [ 1, 3, 2 ]
+          offset: 4
+        }
+        exprs {
+          vars: [ 1, 0 ]
+          coeffs: [ 2, 1 ]
+          offset: 5
+        }
+        exprs {
+          vars: [ 0, 1 ]
+          coeffs: [ 1, -1 ]
+          offset: 10
+        }
+        exprs {
+          vars: [ 0, 1 ]
+          coeffs: [ 1, -1 ]
+          offset: 2
+        }
+      }
+    }
+  )pb");
+  PresolveContext context(&model, &working_model, nullptr);
+  context.InitializeNewDomains();
+  EXPECT_FALSE(context.ConstraintIsCanonical(0));
+  context.CanonicalizeConstraintsLazily();
+  EXPECT_TRUE(context.AllConstraintsAreCanonical());
+
+  const ConstraintProto expected = ParseTestProto(R"pb(
+    lin_max {
+      target {
+        vars: [ 1, 2 ]
+        coeffs: [ 3, 3 ]
+        offset: 4
+      }
+      exprs {
+        vars: [ 0, 1 ]
+        coeffs: [ 1, -1 ]
+        offset: 2
+      }
+      exprs {
+        vars: [ 0, 1 ]
+        coeffs: [ 1, -1 ]
+        offset: 10
+      }
+      exprs {
+        vars: [ 0, 1 ]
+        coeffs: [ 1, 2 ]
+        offset: 5
+      }
+    }
+  )pb");
+  EXPECT_THAT(context.Constraint(0), testing::EqualsProto(expected));
+}
+
+TEST(PresolveContextTest, CanonicalizeLinMaxCancelsZeroCoefficientTerms) {
+  Model model;
+  CpModelProto working_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      lin_max {
+        target {
+          vars: [ 0, 1, 0 ]
+          coeffs: [ 2, 0, -2 ]
+          offset: 3
+        }
+        exprs {
+          vars: [ 1, 1 ]
+          coeffs: [ 4, -4 ]
+          offset: 7
+        }
+        exprs { offset: 1 }
+      }
+    }
+  )pb");
+  PresolveContext context(&model, &working_model, nullptr);
+  context.InitializeNewDomains();
+  EXPECT_FALSE(context.ConstraintIsCanonical(0));
+  context.CanonicalizeConstraintsLazily();
+  EXPECT_TRUE(context.AllConstraintsAreCanonical());
+
+  const ConstraintProto expected = ParseTestProto(R"pb(
+    lin_max {
+      target { offset: 3 }
+      exprs { offset: 1 }
+      exprs { offset: 7 }
+    }
+  )pb");
+  EXPECT_THAT(context.Constraint(0), testing::EqualsProto(expected));
+}
+
+TEST(PresolveContextTest, CanonicalizeLinMaxEnforcementLiterals) {
+  Model model;
+  CpModelProto working_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 20 ] }
+    constraints {
+      enforcement_literal: [ 1, -1, 1 ]
+      lin_max {
+        target {
+          vars: [ 0, 1, 2 ]
+          coeffs: [ 3, 4, 5 ]
+          offset: 1
+        }
+        exprs {
+          vars: [ 1, 2 ]
+          coeffs: [ 2, 1 ]
+          offset: 10
+        }
+        exprs {
+          vars: [ 0, 2 ]
+          coeffs: [ -2, 1 ]
+          offset: 5
+        }
+      }
+    }
+  )pb");
+  PresolveContext context(&model, &working_model, nullptr);
+  context.InitializeNewDomains();
+  EXPECT_FALSE(context.ConstraintIsCanonical(0));
+  context.CanonicalizeConstraintsLazily();
+  EXPECT_TRUE(context.AllConstraintsAreCanonical());
+
+  const ConstraintProto expected = ParseTestProto(R"pb(
+    enforcement_literal: [ -1, 1 ]
+    lin_max {
+      target {
+        vars: [ 2 ]
+        coeffs: [ 5 ]
+        offset: 5
+      }
+      exprs {
+        vars: [ 2 ]
+        coeffs: [ 1 ]
+        offset: 5
+      }
+      exprs {
+        vars: [ 2 ]
+        coeffs: [ 1 ]
+        offset: 12
+      }
+    }
+  )pb");
+  EXPECT_THAT(context.Constraint(0), testing::EqualsProto(expected));
+}
+
+TEST(PresolveContextTest, CanonicalizeLinearConstraintWithEnforcements) {
+  Model model;
+  CpModelProto working_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      enforcement_literal: [ 0, -2 ]
+      linear {
+        vars: [ 2, 0, 2, 1 ]
+        coeffs: [ 3, 4, -1, 5 ]
+        domain: [ 10, 20 ]
+      }
+    }
+  )pb");
+  PresolveContext context(&model, &working_model, nullptr);
+  context.InitializeNewDomains();
+  EXPECT_TRUE(
+      context.CanonicalizeLinearConstraint(context.MutableConstraint(0)));
+  const ConstraintProto expected = ParseTestProto(R"pb(
+    enforcement_literal: [ 0, -2 ]
+    linear {
+      vars: [ 2 ]
+      coeffs: [ 2 ]
+      domain: [ 6, 16 ]
+    }
+  )pb");
+  EXPECT_THAT(context.Constraint(0), testing::EqualsProto(expected));
+}
+
 TEST(PresolveContextTest, CanonicalizeLinMaxLiteralAndNegationInInitialProto) {
   Model model;
   CpModelProto working_model = ParseTestProto(R"pb(
@@ -2282,6 +2469,63 @@ TEST(PresolveContextTest,
   EXPECT_THAT(context.Constraint(5), testing::EqualsProto(R"pb(
                 bool_or { literals: [ -4, -3 ] }
               )pb"));
+}
+
+TEST(PresolveContextTest, CheckSortedParameterInConstraintIsCanonical) {
+  CpModelProto permuted_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      enforcement_literal: [ 2, -1 ]
+      linear {
+        vars: [ 4, 3 ]
+        coeffs: [ 1, -2 ]
+        domain: [ -10, 5 ]
+      }
+    }
+    constraints { bool_or { literals: [ 2, -1, 1 ] } }
+    constraints { bool_xor { literals: [ -3, 0, 1 ] } }
+    constraints {
+      lin_max {
+        target {
+          vars: [ 3 ]
+          coeffs: [ 1 ]
+        }
+        exprs {
+          vars: [ 4, 3 ]
+          coeffs: [ 1, 1 ]
+          offset: 2
+        }
+        exprs {
+          vars: [ 3 ]
+          coeffs: [ 1 ]
+          offset: 1
+        }
+      }
+    }
+  )pb");
+  Model model;
+  PresolveContext context(&model, &permuted_model, nullptr);
+  context.InitializeNewDomains();
+  for (int c = 0; c < context.NumConstraints(); ++c) {
+    EXPECT_FALSE(context.ConstraintIsCanonical(c, /*check_sorted=*/true));
+  }
+  EXPECT_TRUE(context.AllConstraintsAreCanonical(/*check_sorted=*/false));
+  EXPECT_TRUE(context.ModelProtoIsCanonical(&permuted_model));
+
+  // Duplicate or complementary variables are still rejected when
+  // check_sorted = false.
+  CpModelProto dup_bool_or = permuted_model;
+  dup_bool_or.mutable_constraints(1)->mutable_bool_or()->add_literals(-3);
+  EXPECT_FALSE(context.ModelProtoIsCanonical(&dup_bool_or));
+
+  CpModelProto dup_linear = permuted_model;
+  dup_linear.mutable_constraints(0)->mutable_linear()->add_vars(4);
+  dup_linear.mutable_constraints(0)->mutable_linear()->add_coeffs(1);
+  EXPECT_FALSE(context.ModelProtoIsCanonical(&dup_linear));
 }
 
 }  // namespace

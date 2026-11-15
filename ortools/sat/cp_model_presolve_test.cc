@@ -128,6 +128,12 @@ CpModelProto PresolveForTest(
   return presolved_model;
 }
 
+bool ModelProtoIsCanonical(CpModelProto model_proto) {
+  Model model;
+  PresolveContext context(&model, &model_proto, nullptr);
+  return context.ModelProtoIsCanonical(&model_proto);
+}
+
 // This expects the presolve to remove everything and return the mapping model.
 CpModelProto GetMappingModel(const CpModelProto& initial_model,
                              const SatParameters& extra_params) {
@@ -750,7 +756,7 @@ TEST(PresolveCpModelTest, ConvertToEquality) {
     variables { domain: [ 0, 12 ] }
     constraints {
       linear {
-        vars: [ 3, 1 ]
+        vars: [ 1, 3 ]
         coeffs: [ 1, -1 ]
         domain: [ 0, 0 ]
       }
@@ -913,8 +919,8 @@ TEST(PresolveCpModelTest, BasicLinAbsPresolveFixedTarget) {
     constraints {
       lin_max {
         target: { vars: 2 coeffs: 1 }
-        exprs: { vars: 0 coeffs: 10 offset: -5 }
         exprs: { vars: 1 coeffs: 1 }
+        exprs: { vars: 0 coeffs: 10 offset: -5 }
       }
     }
   )pb");
@@ -6242,9 +6248,9 @@ TEST(PresolveCpModelTest, AffineElement) {
     variables { domain: [ 1, 6 ] }
     constraints {
       linear {
-        vars: [ 1, 0 ]
+        vars: [ 0, 1 ]
         coeffs: [ 1, -1 ]
-        domain: [ 1, 1 ]
+        domain: [ -1, -1 ]
       }
     }
   )pb");
@@ -8743,11 +8749,11 @@ TEST(PresolveCpModelTest, DetectDuplicateLinMaxWithPermutedExprs) {
   SatParameters params;
   params.set_keep_all_feasible_solutions_in_presolve(true);
   const CpModelProto presolved_model = PresolveForTest(initial_model, params);
+  EXPECT_TRUE(ModelProtoIsCanonical(presolved_model));
   int num_lin_max = 0;
   for (const ConstraintProto& ct : presolved_model.constraints()) {
     if (ct.constraint_case() == ConstraintProto::kLinMax) {
       ++num_lin_max;
-      EXPECT_TRUE(LinMaxIsCanonical(ct));
     }
   }
   EXPECT_EQ(num_lin_max, 1);
@@ -8780,11 +8786,7 @@ TEST(PresolveCpModelTest, LinMaxCanonicalAfterDegreeTwoSubstitution) {
   )pb");
   const CpModelProto presolved_model =
       PresolveForTest(initial_model, SatParameters());
-  for (const ConstraintProto& ct : presolved_model.constraints()) {
-    if (ct.constraint_case() == ConstraintProto::kLinMax) {
-      EXPECT_TRUE(LinMaxIsCanonical(ct));
-    }
-  }
+  EXPECT_TRUE(ModelProtoIsCanonical(presolved_model));
 }
 
 TEST(PresolveCpModelTest, LinMaxWithLiteralAndNegationInInitialProto) {
@@ -10038,6 +10040,171 @@ TEST(PresolveTest, EnforcedBoolXorStripsEnforcementAndDeduplicatesWithClause) {
     }
   )pb");
   EXPECT_THAT(presolved_model, EqualsProto(expected_presolved_model));
+}
+
+TEST(PresolveTest,
+     PresolveOutputIsCanonicalEvenWhenPresolveDisabledOrPermuted) {
+  const CpModelProto initial_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      enforcement_literal: [ 1, 0, 1 ]
+      lin_max {
+        target {
+          vars: [ 3, 0 ]
+          coeffs: [ 1, 2 ]
+        }
+        exprs {
+          vars: [ 2, 1 ]
+          coeffs: [ 2, 3 ]
+          offset: 1
+        }
+        exprs {
+          vars: [ 3, 2 ]
+          coeffs: [ -1, 1 ]
+          offset: 4
+        }
+      }
+    }
+    constraints {
+      linear {
+        vars: [ 3, 2 ]
+        coeffs: [ -2, 2 ]
+        domain: [ 0, 4 ]
+      }
+    }
+    constraints { bool_or { literals: [ 1, 0 ] } }
+  )pb");
+
+  SatParameters no_presolve_params;
+  no_presolve_params.set_cp_model_presolve(false);
+  const CpModelProto no_presolve_model =
+      PresolveForTest(initial_model, no_presolve_params);
+  EXPECT_EQ(ValidateCpModel(no_presolve_model, /*after_presolve=*/true), "");
+  EXPECT_TRUE(ModelProtoIsCanonical(no_presolve_model));
+
+  SatParameters permuted_params;
+  permuted_params.set_permute_variable_randomly(true);
+  permuted_params.set_keep_all_feasible_solutions_in_presolve(true);
+  const CpModelProto permuted_model =
+      PresolveForTest(initial_model, permuted_params);
+  EXPECT_EQ(ValidateCpModel(permuted_model, /*after_presolve=*/true), "");
+  EXPECT_TRUE(ModelProtoIsCanonical(permuted_model));
+}
+
+TEST(PresolveCpModelTest, RemovesUnperformedIntervalStubsWhenPresolveDisabled) {
+  // Variable 0 is unfixed during ModelCopy, then fixed to 0 by canonicalizing
+  // the size-1 at_most_one / bool_or (`bool_or { literals: [-1, -1] }`).
+  const CpModelProto initial_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 10 ] }
+    variables { domain: [ 0, 10 ] }
+    constraints {
+      enforcement_literal: [ 0 ]
+      interval {
+        start { vars: 1 coeffs: 1 }
+        size { offset: 2 }
+        end { vars: 2 coeffs: 1 }
+      }
+    }
+    constraints {
+      interval {
+        start { vars: 1 coeffs: 1 }
+        size { offset: 3 }
+        end { vars: 2 coeffs: 1 }
+      }
+    }
+    constraints { bool_or { literals: [ -1, -1 ] } }
+    constraints { no_overlap { intervals: [ 0, 1 ] } }
+    constraints {
+      no_overlap_2d {
+        x_intervals: [ 0, 1 ]
+        y_intervals: [ 1, 1 ]
+      }
+    }
+    constraints {
+      cumulative {
+        capacity { offset: 5 }
+        intervals: [ 0, 1 ]
+        demands { offset: 2 }
+        demands { offset: 3 }
+      }
+    }
+  )pb");
+
+  SatParameters params;
+  params.set_cp_model_presolve(false);
+  const CpModelProto presolved = PresolveForTest(initial_model, params);
+  EXPECT_EQ(ValidateCpModel(presolved, /*after_presolve=*/true), "");
+  EXPECT_TRUE(ModelProtoIsCanonical(presolved));
+  for (const ConstraintProto& ct : presolved.constraints()) {
+    if (ct.constraint_case() == ConstraintProto::kInterval) {
+      EXPECT_TRUE(ct.interval().has_start());
+      EXPECT_TRUE(ct.interval().has_size());
+      EXPECT_TRUE(ct.interval().has_end());
+    }
+  }
+
+  // Also check with presolve enabled (which runs ApplyVariableMapping() before
+  // RemoveEmptyConstraints()).
+  SatParameters presolve_params;
+  presolve_params.set_cp_model_presolve(true);
+  const CpModelProto presolved_enabled =
+      PresolveForTest(initial_model, presolve_params);
+  EXPECT_EQ(ValidateCpModel(presolved_enabled, /*after_presolve=*/true), "");
+  EXPECT_TRUE(ModelProtoIsCanonical(presolved_enabled));
+  for (const ConstraintProto& ct : presolved_enabled.constraints()) {
+    if (ct.constraint_case() == ConstraintProto::kInterval) {
+      EXPECT_TRUE(ct.interval().has_start());
+      EXPECT_TRUE(ct.interval().has_size());
+      EXPECT_TRUE(ct.interval().has_end());
+    }
+  }
+}
+
+TEST(PresolveCpModelTest,
+     PresolveDisabledKeepsExpansionAffineEquivalencesInWorkingModel) {
+  // Variable 0 (index in {0, 1}) selects between constants [0, 1] into boolean
+  // target variable 1 (`element`), so ExpandElement records `var 1 == var 0`
+  // via StoreBooleanEqualityRelation. Canonicalizing `bool_or { literals: [1,
+  // 2] }` replaces `var 1` with its representative (`var 0`), leaving `var 1`
+  // unused in working_model_. With `cp_model_presolve: false`, postsolve does
+  // not run on `mapping_model`, so `EncodeAllAffineRelations()` must emit `var
+  // 0 == var 1` into `working_model_` rather than offloading it to
+  // `mapping_model`.
+  const CpModelProto initial_model = ParseTestProto(R"pb(
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    variables { domain: [ 0, 1 ] }
+    constraints {
+      element {
+        linear_index { vars: 0 coeffs: 1 }
+        linear_target { vars: 1 coeffs: 1 }
+        exprs { offset: 0 }
+        exprs { offset: 1 }
+      }
+    }
+    constraints { bool_or { literals: [ 1, 2 ] } }
+    objective {
+      vars: [ 0, 1, 2 ]
+      coeffs: [ 10, -5, 1 ]
+    }
+  )pb");
+
+  SatParameters params;
+  params.set_cp_model_presolve(false);
+  const CpModelProto presolved = PresolveForTest(initial_model, params);
+  EXPECT_EQ(ValidateCpModel(presolved, /*after_presolve=*/true), "");
+  EXPECT_TRUE(ModelProtoIsCanonical(presolved));
+
+  Model model;
+  *model.GetOrCreate<SatParameters>() = params;
+  const CpSolverResponse response = SolveCpModel(initial_model, &model);
+  ASSERT_EQ(response.status(), CpSolverStatus::OPTIMAL);
+  EXPECT_EQ(response.solution(0), response.solution(1));
+  EXPECT_TRUE(response.solution(1) == 1 || response.solution(2) == 1);
 }
 
 }  // namespace

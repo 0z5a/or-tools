@@ -157,14 +157,20 @@ bool FeasibilityJumpSolver::Initialize() {
   shared_time_limit_->UpdateLocalLimit(&time_limit_);
 
   const CpModelProto& model_proto = dense_model_.proto();
+  LinearModel linear_model(model_proto);
+  std::vector<bool> ignored(model_proto.constraints_size(), false);
+  if (params_.feasibility_jump_linearization_level() != 0) {
+    ignored = linear_model.ignored_constraints();
+  }
+
   if (params_.feasibility_jump_linearization_level() == 0) {
-    evaluator_ =
-        std::make_unique<LsEvaluator>(model_proto, params_, &time_limit_);
-  } else {
-    LinearModel linear_model(model_proto);
     evaluator_ = std::make_unique<LsEvaluator>(
-        model_proto, params_, linear_model.ignored_constraints(),
-        linear_model.additional_constraints(), &time_limit_);
+        model_proto, params_, ignored, absl::Span<const ConstraintProto>{},
+        &time_limit_);
+  } else {
+    evaluator_ = std::make_unique<LsEvaluator>(
+        model_proto, params_, ignored, linear_model.additional_constraints(),
+        &time_limit_);
   }
 
   if (time_limit_.LimitReached()) {

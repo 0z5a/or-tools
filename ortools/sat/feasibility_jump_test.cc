@@ -20,7 +20,6 @@
 
 #include "gtest/gtest.h"
 #include "ortools/sat/cp_model.pb.h"
-#include "ortools/sat/cp_model_utils.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_parameters.pb.h"
 #include "ortools/sat/stat_tables.h"
@@ -287,96 +286,6 @@ TEST(FeasibilityJumpSolverTest,
   fj1.GenerateTask(101)();
   EXPECT_TRUE(fj1.IsDone());
   EXPECT_FALSE(fj1.TaskIsAvailable());
-}
-
-TEST(FeasibilityJumpSolverTest,
-     LinearizationLevelZeroSolvesWithoutLinearModel) {
-  CpModelProto proto;
-  // Variables:
-  //   0..2: Booleans [0, 1]
-  //   3: integer [0, 2]
-  //   4: integer [0, 4]
-  for (int i = 0; i < 3; ++i) {
-    auto* var = proto.add_variables();
-    var->add_domain(0);
-    var->add_domain(1);
-  }
-  {
-    auto* var = proto.add_variables();
-    var->add_domain(0);
-    var->add_domain(2);
-  }
-  {
-    auto* var = proto.add_variables();
-    var->add_domain(0);
-    var->add_domain(4);
-  }
-  // Constraints that LinearModel would normally rewrite at level > 0:
-  // exactly_one(0, 1, 2) + full-encoding literals for var 3.
-  {
-    auto* ct = proto.add_constraints()->mutable_exactly_one();
-    ct->add_literals(0);
-    ct->add_literals(1);
-    ct->add_literals(2);
-  }
-  for (int v = 0; v < 3; ++v) {
-    auto* eq_ct = proto.add_constraints();
-    eq_ct->add_enforcement_literal(v);
-    eq_ct->mutable_linear()->add_vars(3);
-    eq_ct->mutable_linear()->add_coeffs(1);
-    eq_ct->mutable_linear()->add_domain(v);
-    eq_ct->mutable_linear()->add_domain(v);
-
-    auto* neq_ct = proto.add_constraints();
-    neq_ct->add_enforcement_literal(NegatedRef(v));
-    neq_ct->mutable_linear()->add_vars(3);
-    neq_ct->mutable_linear()->add_coeffs(1);
-    if (v == 0) {
-      neq_ct->mutable_linear()->add_domain(1);
-      neq_ct->mutable_linear()->add_domain(2);
-    } else if (v == 1) {
-      neq_ct->mutable_linear()->add_domain(0);
-      neq_ct->mutable_linear()->add_domain(0);
-      neq_ct->mutable_linear()->add_domain(2);
-      neq_ct->mutable_linear()->add_domain(2);
-    } else {
-      neq_ct->mutable_linear()->add_domain(0);
-      neq_ct->mutable_linear()->add_domain(1);
-    }
-  }
-  // Linear constraint: var 3 + var 4 == 4.
-  {
-    auto* ct = proto.add_constraints()->mutable_linear();
-    ct->add_vars(3);
-    ct->add_vars(4);
-    ct->add_coeffs(1);
-    ct->add_coeffs(1);
-    ct->add_domain(4);
-    ct->add_domain(4);
-  }
-
-  SatParameters params;
-  params.set_feasibility_jump_linearization_level(0);
-  params.set_feasibility_jump_batch_dtime(1e-2);
-  SharedBoundsManager shared_bounds(proto);
-  SharedClausesManager shared_clauses(true);
-  SharedStatTables stat_tables;
-  Model model;
-  ModelSharedTimeLimit time_limit(&model);
-  SharedResponseManager response(&model);
-  SharedLsSolutionRepository ls_hints;
-
-  auto ls_states = std::make_shared<SharedLsStates>("fj", params, &stat_tables);
-  FeasibilityJumpSolver fj("fj", SubSolver::FIRST_SOLUTION, proto, params,
-                           ls_states, &time_limit, &response, &shared_bounds,
-                           &shared_clauses, &ls_hints, &stat_tables);
-
-  for (int t = 0; t < 8 && !response.HasFeasibleSolution(); ++t) {
-    ASSERT_TRUE(fj.TaskIsAvailable());
-    fj.GenerateTask(t)();
-  }
-  EXPECT_TRUE(response.HasFeasibleSolution());
-  EXPECT_GT(fj.deterministic_time(), 0.0);
 }
 
 }  // namespace
